@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GuiToLua | Roblox UI Converter</title>
+    <style>
+        :root {
+            --bg: #0f1014;
+            --surface: #1b1e24;
+            --primary: #00ff88;
+            --text: #ffffff;
+            --text-dim: #a0a0a0;
+        }
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        body { background-color: var(--bg); color: var(--text); line-height: 1.6; }
+        
+        /* Layout */
+        .container { max-width: 1000px; margin: 0 auto; padding: 0 20px; }
+        
+        /* Nav */
+        nav { padding: 20px 0; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #2a2a2a; }
+        .logo { font-weight: 900; font-size: 1.5rem; letter-spacing: -1px; color: var(--primary); }
+        .links a { color: var(--text-dim); text-decoration: none; margin-left: 20px; font-weight: 600; transition: 0.2s; }
+        .links a:hover { color: var(--primary); }
+        
+        /* Hero */
+        header { text-align: center; padding: 100px 0; }
+        h1 { font-size: 4rem; font-weight: 800; line-height: 1.1; margin-bottom: 20px; }
+        h1 span { color: var(--primary); }
+        .subtitle { font-size: 1.2rem; color: var(--text-dim); max-width: 600px; margin: 0 auto 40px; }
+        
+        .btn { display: inline-block; background: var(--primary); color: #000; padding: 15px 40px; font-weight: 800; text-decoration: none; border-radius: 50px; transition: transform 0.2s; }
+        .btn:hover { transform: scale(1.05); }
+        .btn-outline { background: transparent; color: var(--primary); border: 2px solid var(--primary); margin-left: 10px; }
+        
+        /* Features */
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 30px; margin: 80px 0; }
+        .card { background: var(--surface); padding: 30px; border-radius: 12px; border: 1px solid #2a2a2a; }
+        .card h3 { color: var(--primary); margin-bottom: 15px; }
+        
+        /* Code Block */
+        pre { background: #000; padding: 20px; border-radius: 8px; overflow-x: auto; color: #ccc; margin: 20px 0; border-left: 4px solid var(--primary); }
+        
+        /* Footer */
+        footer { text-align: center; padding: 40px 0; color: var(--text-dim); border-top: 1px solid #2a2a2a; margin-top: 80px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <nav>
+            <div class="logo">G2L Converter</div>
+            <div class="links">
+                <a href="#features">Features</a>
+                <a href="#install">Install</a>
+                <a href="https://github.com/uniquadev/GuiToLuaConverter">GitHub</a>
+            </div>
+        </nav>
+
+        <header>
+            <h1>Turn Roblox UI into<br><span>Clean Lua Code</span></h1>
+            <p class="subtitle">The most advanced, optimized, and open-source ScreenGui converter for professional Roblox developers. No bloat. Pure speed.</p>
+            <div>
+                <a href="https://create.roblox.com/marketplace/asset/10139235293" class="btn">Get Plugin</a>
+                <a href="https://github.com/uniquadev/GuiToLuaConverter" class="btn btn-outline">Source Code</a>
+            </div>
+        </header>
+
+        <div id="features" class="grid">
+            <div class="card">
+                <h3>⚡ Zero Lag</h3>
+                <p>New buffer-based engine handles massive UIs with thousands of elements instantly. No more Studio crashes.</p>
+            </div>
+            <div class="card">
+                <h3>🛠️ Full API Support</h3>
+                <p>Auto-updated properties from the Roblox API. Supports Attributes, Tags, and Rich Text scaling perfectly.</p>
+            </div>
+            <div class="card">
+                <h3>📦 Smart Bundling</h3>
+                <p>Automatically wraps LocalScripts and ModuleScripts, preserving your code structure and variable environments.</p>
+            </div>
+        </div>
+
+        <section id="install">
+            <h2>Installation</h2>
+            <p style="color:var(--text-dim); margin-bottom: 20px;">Use the plugin directly or build from source with Rojo.</p>
+            
+            <pre><code># Clone the repository
+git clone https://github.com/uniquadev/GuiToLuaConverter
+
+# Build with Rojo
+rojo build -o GuiToLua.rbxmx</code></pre>
+        </section>
+
+        <footer>
+            <p>&copy; 2026 uniquadev. Licensed under Apache 2.0.</p>
+        </footer>
+    </div>
+
+</body>
+</html>
