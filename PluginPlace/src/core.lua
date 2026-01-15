@@ -1,393 +1,213 @@
--- FLOW
--- => Convert(Gui)
--- => LoadDescendants(Res)
---  * Loop all descendants and store them in a reg
--- => WriteInstances(Res) 
---  * Write all instances as long with their properties and attributes
--- => WriteScripts(Res)
---  * Write all scripts routines with their env
--- => Append a default return of the screengui
--- => WriteLogo(Res)
--- return
+-- FLOW: Convert -> Buffer -> Join -> Return
+-- Optimized for speed using table buffers instead of string concatenation.
 
 --// REQUIRES \\--
-local RbxApi = require(script.Parent.rbxapi);
-local Utils = require(script.Parent.utils);
-local RequireProxy = script.Parent.assets.require;
-local Logo = script.Parent.assets.logo.Value;
+local RbxApi = require(script.Parent.rbxapi)
+local Utils = require(script.Parent.utils)
+local RequireProxy = script.Parent.assets.require
+local Logo = script.Parent.assets.logo.Value
 local CollectionService = game:GetService("CollectionService")
 
---// CONST \\--
-local F_NEWINST = 
-	[[
-%s["%s"] = Instance.new("%s", %s);
-%s
-%s
-%s
-]]; -- %s = Settings.RegName, %s = Id, %s = ClassName, %s = Parent, %s = Properties, %s = Attributes. % = Tags
-local F_NEWLUA =
-	[[
-local function %s()
-%s
-end;
-task.spawn(%s);
-]] -- %s = ClosureName, %s = ModifiedSource, %s = ClosureName
-local F_NEWMOD =
-	[=[
-G2L_MODULES[%s["%s"]] = {
-Closure = function()
-    local script = %s["%s"];%s
-end;
-};
-]=] -- %s = RegName, %s = Id, %s = Module.Source, %s = RegName, %s = Id, %s = RegName, %s = Id
-
+--// CONFIG \\--
 local BLACKLIST = {
     Source = true,
     Parent = true,
-    ImageContent = true
+    ImageContent = true,
+    Capabilities = true, -- New internal property that breaks shit
+    DefinesCapabilities = true
 }
 
-local math_round = math.round
-
---// STRUCT \\--
-
-export type RegInstance = {
-    Id: string,
-    Instance: Instance,
-    Parent: RegInstance
+--// TYPES \\--
+type Settings = {
+    RegName: string,
+    Comments: boolean,
+    Logo: boolean,
+    Minify: boolean
 }
 
-export type ConvertionRes = {
+type ConvertionRes = {
     Gui: ScreenGui,
     Settings: Settings,
-    Errors: {[number]: string},
-    Source: string,
-    _INST: {[number]: RegInstance},
-    _LUA: {RegInstance}, -- hold local scripts
-    _MOD: {RegInstance},  -- hold module scripts
+    Buffer: {string}, -- The string buffer
+    _INST: {[number]: any},
+    _LUA: {any},
+    _MOD: {any},
     HasTags: boolean,
     NumTags: number
 }
 
-export type Settings = {
-    RegName: string,
-    Comments: boolean,
-    Logo: boolean
-}
+--// HELPERS \\--
+local function PrettifyNumber(n: number): any
+    if n == 0 then return "0" end -- Save bytes
+    local s = string.format("%.4f", n)
+    return (s:gsub("%.?0+$", "")) -- Strip trailing zeros
+end
 
---// UTIL \\--
-local function EncapsulateString(Str:string)
-    local Level = '';
+local function EncapsulateString(Str: string)
+    -- Handle complex nesting for long strings
+    local Level = ""
     while true do
-        if Str:find(']' .. Level .. ']') then
-            Level = Level .. '=';
+        if Str:find("]" .. Level .. "]") then
+            Level = Level .. "="
         else
-            break;
+            break
         end
     end
-    return '['..Level..'[' .. Str .. ']'..Level..']';
-end;
-
---// CORE \\--
-
-local function DefaultSettings() : Settings
-    return {
-        RegName = 'G2L',
-        Comments = true,
-        Logo = true
-    };
+    return "[" .. Level .. "[" .. Str .. "]" .. Level .. "]"
 end
 
-local function PrettifyNumber(number: number): number
-    return math_round(number * 100000) / 100000
+--// TRANSPILER \\--
+local function TranspileValue(Raw: any): string
+    local Type = typeof(Raw)
+    
+    if Type == 'string' then return EncapsulateString(Raw)
+    elseif Type == 'boolean' then return tostring(Raw)
+    elseif Type == 'number' then return PrettifyNumber(Raw)
+    elseif Type == 'EnumItem' then return tostring(Raw)
+    
+    elseif Type == 'Vector2' then return string.format("Vector2.new(%s, %s)", PrettifyNumber(Raw.X), PrettifyNumber(Raw.Y))
+    elseif Type == 'Vector3' then return string.format("Vector3.new(%s, %s, %s)", PrettifyNumber(Raw.X), PrettifyNumber(Raw.Y), PrettifyNumber(Raw.Z))
+    elseif Type == 'UDim2' then return string.format("UDim2.new(%s, %s, %s, %s)", PrettifyNumber(Raw.X.Scale), PrettifyNumber(Raw.X.Offset), PrettifyNumber(Raw.Y.Scale), PrettifyNumber(Raw.Y.Offset))
+    elseif Type == 'UDim' then return string.format("UDim.new(%s, %s)", PrettifyNumber(Raw.Scale), PrettifyNumber(Raw.Offset))
+    elseif Type == 'Rect' then return string.format("Rect.new(%s, %s, %s, %s)", PrettifyNumber(Raw.Min.X), PrettifyNumber(Raw.Min.Y), PrettifyNumber(Raw.Max.X), PrettifyNumber(Raw.Max.Y))
+    elseif Type == 'Color3' then 
+        local R, G, B = math.round(Raw.R*255), math.round(Raw.G*255), math.round(Raw.B*255)
+        return string.format("Color3.fromRGB(%d, %d, %d)", R, G, B)
+    elseif Type == 'Font' then
+        return string.format("Font.new(%s, %s, %s)", EncapsulateString(Raw.Family), tostring(Raw.Weight), tostring(Raw.Style))
+    end
+    
+    -- Fallback for complex types usually just works with tostring or specialized parsers if you add them later
+    return "nil --[[Unsupported Type: " .. Type .. "]]"
 end
 
--- Load descendants and order them in a flatted tree array, in order to provide a y(x) convertion
-local function LoadDescendants(Res:ConvertionRes, Inst:Instance, Parent:RegInstance) : nil
-    -- register instance
-    local Size = #Res._INST+1;
+local function TranspileProperties(Res: ConvertionRes, Inst: any)
+    local PropsBuffer = {}
+    local Members = RbxApi.GetProperties(Inst.Instance.ClassName)
+    
+    for Member, Default in pairs(Members) do
+        if BLACKLIST[Member] then continue end
+        
+        local Success, CurrentValue = pcall(function() return Inst.Instance[Member] end)
+        if not Success then continue end -- Security permissions or deprecated shit
+        
+        -- Check if default
+        if CurrentValue == Default.Value then continue end
+        
+        local ValStr = TranspileValue(CurrentValue)
+        if ValStr and ValStr ~= "nil" then
+            table.insert(PropsBuffer, string.format('%s["%s"]["%s"] = %s;', Res.Settings.RegName, Inst.Id, Member, ValStr))
+        end
+    end
+    
+    return table.concat(PropsBuffer, "\n")
+end
+
+--// PIPELINE \\--
+
+local function LoadDescendants(Res: ConvertionRes, Inst: Instance, Parent: any)
+    local Size = #Res._INST + 1
     local RegInst = {
         Parent = Parent,
         Instance = Inst,
-        Id = ('%x'):format(Size); -- hex format simple unique id
-    };
-    Res._INST[Size] = RegInst;
-    -- check if local script
-    if Inst:IsA('LocalScript') then
-        Res._LUA[#Res._LUA+1] = RegInst;
-    elseif Inst:IsA('ModuleScript') then
-        Res._MOD[#Res._MOD+1] = RegInst;
-    end;
-    -- loop children
-    for Idx, Child in next, Inst:GetChildren() do
-        LoadDescendants(Res, Child, RegInst) -- recursive time 8)
-    end;
-end;
-
--- transpile property to lua
-local function TranspileValue(RawValue:any)
-    local Value = '';
-    local Type = typeof(RawValue);
-    if Type == 'string' then
-        Value = EncapsulateString(RawValue);
-    elseif Type == 'boolean' or Type:match('^Enum') then
-        Value = tostring(RawValue);
-    -- %.3f format might be better
-    elseif Type == 'number' then
-		Value = PrettifyNumber(RawValue)
-    elseif Type == 'Vector2' then
-        Value = ('Vector2.new(%s, %s)'):format(
-            PrettifyNumber(RawValue.X), PrettifyNumber(RawValue.Y)
-        );
-    elseif Type == 'Vector3' then
-        Value = ('Vector3.new(%s, %s, %s)'):format(
-            PrettifyNumber(RawValue.X), PrettifyNumber(RawValue.Y), PrettifyNumber(RawValue.Z)
-        );
-    elseif Type == 'UDim2' then
-        Value = ('UDim2.new(%s, %s, %s, %s)'):format(
-            PrettifyNumber(RawValue.X.Scale), PrettifyNumber(RawValue.X.Offset),
-            PrettifyNumber(RawValue.Y.Scale), PrettifyNumber(RawValue.Y.Offset)
-        );
-    elseif Type == 'UDim' then
-        Value = ('UDim.new(%s, %s)'):format(
-            PrettifyNumber(RawValue.Scale), PrettifyNumber(RawValue.Offset)
-        );
-    elseif Type == 'Rect' then
-        Value = ('Rect.new(%s, %s, %s, %s)'):format(
-            PrettifyNumber(RawValue.Min.X), PrettifyNumber(RawValue.Min.Y),
-            PrettifyNumber(RawValue.Max.X), PrettifyNumber(RawValue.Max.Y)
-        );
-    elseif Type == "Font" then
-        Value = ('Font.new(%s, %s, %s)'):format(
-			EncapsulateString(RawValue.Family), tostring(RawValue.Weight), tostring(RawValue.Style)
-		);
-    elseif Type == 'Color3' then
-        -- convert rgb float value to decimal
-        local R, G, B = math.ceil(RawValue.R * 255), math.ceil(RawValue.G * 255), math.ceil(RawValue.B * 255);
-        Value = ('Color3.fromRGB(%s, %s, %s)'):format(
-            R, G, B
-        );
-    elseif Type == "ColorSequence" then
-        local Keypoints = '';
-        for Idx, KeyPoint:ColorSequenceKeypoint in next, RawValue.Keypoints do
-            Keypoints = Keypoints .. ('ColorSequenceKeypoint.new(%.3f, %s),'):format(
-                KeyPoint.Time, TranspileValue(KeyPoint.Value)
-            );
-        end;
-        -- remove last comma
-        Keypoints = Keypoints:sub(1, -2);
-        Value = ('ColorSequence.new{%s}'):format(Keypoints);
-	elseif Type == "NumberSequence" then
-		local Keypoints = '';
-		for Idx, KeyPoint:NumberSequenceKeypoint in next, RawValue.Keypoints do
-			Keypoints = Keypoints .. ('NumberSequenceKeypoint.new(%.3f, %s),'):format(
-				KeyPoint.Time, TranspileValue(KeyPoint.Value)
-			);
-		end;
-		Keypoints = Keypoints:sub(1, -2);
-		Value = ('NumberSequence.new{%s}'):format(Keypoints);
-	elseif Type == "CFrame" then
-		local Position = RawValue.Position;
-		local LookVector = RawValue.LookVector;
-		Value = ('CFrame.new(Vector3.new(%s, %s, %s), Vector3.new(%s, %s, %s))'):format(
-			PrettifyNumber(Position.X), PrettifyNumber(Position.Y), PrettifyNumber(Position.Z),
-			PrettifyNumber(LookVector.X), PrettifyNumber(LookVector.Y), PrettifyNumber(LookVector.Z)
-		)
-	end
-    return Value;
-end
-
-local function TranspileProperties(Res:ConvertionRes, Inst:RegInstance) : string
-    local Properties = '';
-    local Members = RbxApi.GetProperties(Inst.Instance.ClassName);
-    for Member, Default:RbxApi.ValueObject in pairs(Members) do
-        -- special case skip
-        if BLACKLIST[Member] then
-            continue;         
-        -- default property case
-        else
-            local CanSkip = false;
-            -- skip if default value is set
-            local Integrity = pcall(function()
-                CanSkip = Inst.Instance[Member] == Default.Value;
-            end);
-            if CanSkip or not Integrity then
-                continue;
-            end
-            -- transpile value
-            local Transpiled = TranspileValue(Inst.Instance[Member]);
-            -- if transpiled value is not resolved
-            if Transpiled == '' then 
-                if Utils.IsLocal() then
-                    Properties = Properties .. '-- '; -- just comment property to debug it
-                else
-                    Properties = Properties .. ('-- [ERROR] cannot convert %s, please report to "https://github.com/uniquadev/GuiToLuaConverter/issues"\n'):format(Member); -- comment property (not resolved)
-                    continue; -- skip property
-                end;
-            end
-            -- append transpiled property to properties
-            Properties =  Properties .. ('%s["%s"]["%s"] = %s;\n'):format(
-                Res.Settings.RegName, Inst.Id,
-                Member, Transpiled
-            );
-        end;
-    end;
-    -- remove last newline from Properties
-    Properties = Properties:sub(1, -2);
-    return Properties;
-end;
-
-local function TranspileAttributes(Res:ConvertionRes, Inst:RegInstance) : string
-    local Attributes = '';
-    local Found = false;
-    -- loop attributes and transpile them
-    for Attribute, RawValue in next, Inst.Instance:GetAttributes() do
-        local Transpiled = TranspileValue(RawValue);
-        -- if transpiled value is not resolved
-        if Transpiled == '' then 
-            if Utils.IsLocal() then
-                Attributes = Attributes .. '-- '; -- comment property to debug it
-            else
-                continue; -- skip property
-            end;
-        end;
-        Found = true;
-        -- append transpiled attribute to attributes
-        Attributes = Attributes .. ('%s["%s"]:SetAttribute(%s, %s);\n'):format(
-            Res.Settings.RegName, Inst.Id,
-            EncapsulateString(Attribute), Transpiled
-        );
-    end;
-    -- apply comment if attributes found
-    if Found and Res.Settings.Comments then
-        Attributes =  '-- Attributes\n' .. Attributes;
-    end;
-    return Attributes;
-end
-
-local function TranspileTags(Res:ConvertionRes, Inst:RegInstance) : string
-    local Tags, Found = '', false;
-    -- loop tags and transpile them
-    for Index, TagName in next, CollectionService:GetTags(Inst.Instance) do
-		Res.HasTags = true;
-		Found = true;
-        Res.NumTags += 1;
-        -- append tag to variable 'Tags'
-        Tags = Tags .. ('CollectionService:AddTag(%s["%s"], %s);\n'):format(
-            Res.Settings.RegName, Inst.Id,
-            EncapsulateString(TagName)
-        );
+        Id = string.format("%x", Size) -- Hex ID
+    }
+    Res._INST[Size] = RegInst
+    
+    if Inst:IsA("LocalScript") then table.insert(Res._LUA, RegInst)
+    elseif Inst:IsA("ModuleScript") then table.insert(Res._MOD, RegInst)
     end
-    -- apply comment if any instance is tagged
-	if Found and Res.Settings.Comments then
-        Tags = '-- Tags\n' .. Tags;
-    end;
-    return Tags
+    
+    for _, Child in pairs(Inst:GetChildren()) do
+        LoadDescendants(Res, Child, RegInst)
+    end
 end
 
-local function WriteInstances(Res:ConvertionRes)
-    for _, Inst in next, Res._INST do
-        -- set comment
-        local Comment = '';
-        if Res.Settings.Comments then
-            Comment = '-- ' .. Inst.Instance:GetFullName() .. '\n';
+local function WriteInstances(Res: ConvertionRes)
+    local B = Res.Buffer
+    local Reg = Res.Settings.RegName
+    
+    for _, Inst in ipairs(Res._INST) do
+        if Res.Settings.Comments and not Res.Settings.Minify then
+            table.insert(B, string.format("\n-- %s", Inst.Instance.Name))
         end
-        -- solve parent
-        local Parent = '';
-        if Inst.Parent == nil then -- gui case
-            -- TODO: let user choice wich parent use for the ScreenGui from Settings
-            Parent = 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")';
+        
+        local ParentStr
+        if Inst.Parent == nil then
+            ParentStr = 'game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")'
         else
-            Parent = ('%s["%s"]'):format(
-                Res.Settings.RegName, Inst.Parent.Id
-            ); -- we have to get the id to reference the right parent
+            ParentStr = string.format('%s["%s"]', Reg, Inst.Parent.Id)
         end
-        -- write instance
-        Res.Source =  Res.Source .. Comment.. F_NEWINST:format(
-            Res.Settings.RegName,
-            Inst.Id,
-            Inst.Instance.ClassName,
-            Parent,
-            TranspileProperties(Res, Inst), TranspileAttributes(Res, Inst), TranspileTags(Res, Inst)
-        );
+        
+        local Props = TranspileProperties(Res, Inst)
+        
+        -- Instance creation
+        table.insert(B, string.format('\n%s["%s"] = Instance.new("%s");', Reg, Inst.Id, Inst.Instance.ClassName))
+        table.insert(B, string.format('\n%s["%s"].Parent = %s;', Reg, Inst.Id, ParentStr))
+        if Props ~= "" then
+            table.insert(B, "\n" .. Props)
+        end
     end
-end;
+end
 
-local function WriteScripts(Res:ConvertionRes)
-    -- write require proxy before loading all modules
+local function WriteScripts(Res: ConvertionRes)
+    local B = Res.Buffer
+    local Reg = Res.Settings.RegName
+    
+    -- Modules
     if #Res._MOD > 0 then
-        if Res.Settings.Comments then
-            Res.Source = Res.Source .. ('-- Require G2L wrapper\n'):format(#Res._MOD);
-        end;
-        Res.Source = Res.Source .. RequireProxy.Source .. '\n\n';
-    end;
-    -- register all modules state in the G2L_MODULES
-    for _, Module in next, Res._MOD do
-        Res.Source = Res.Source .. F_NEWMOD:format(
-            Res.Settings.RegName, Module.Id,
-            Res.Settings.RegName, Module.Id,
-            Module.Instance.Source
-        );
+        table.insert(B, "\n\n" .. RequireProxy.Source)
+        for _, Mod in ipairs(Res._MOD) do
+            local Source = Mod.Instance.Source
+            table.insert(B, string.format('\nG2L_MODULES[%s["%s"]] = { Closure = function() local script = %s["%s"]; %s end };', 
+                Reg, Mod.Id, Reg, Mod.Id, Source))
+        end
     end
-    for _, Script in next, Res._LUA do
-        -- skip case
-        if Script.Instance.Disabled then
-            continue;
-        end
-        local ClosureName = 'C_' .. Script.Id;
-        -- set comment
-        local Comment = '';
-        if Res.Settings.Comments then
-            Comment = '-- ' .. Script.Instance:GetFullName() .. '\n';
-        end
-        -- fix tabulation and apply script variable in the env
-        local Source = ('local script = %s["%s"];\n\t'):format(
-            Res.Settings.RegName, Script.Id
-        ) .. Script.Instance.Source:gsub('\n', '\n\t');
-        -- write
-        Res.Source = Res.Source .. Comment .. F_NEWLUA:format(
-            ClosureName, Source,
-            ClosureName
-        );
+    
+    -- LocalScripts
+    for _, Script in ipairs(Res._LUA) do
+        if Script.Instance.Disabled then continue end
+        local FuncName = "C_" .. Script.Id
+        local Source = Script.Instance.Source
+        
+        table.insert(B, string.format('\nlocal function %s()\nlocal script = %s["%s"];\n%s\nend; task.spawn(%s);', 
+            FuncName, Reg, Script.Id, Source, FuncName))
     end
 end
 
-local function Convert(Gui:ScreenGui, Settings:Settings?) : ConvertionRes
-    Settings = Settings or DefaultSettings();
-    local Res : ConvertionRes = {
+--// EXPORT \\--
+
+local function Convert(Gui: ScreenGui, Settings: Settings)
+    local Res: ConvertionRes = {
         Gui = Gui,
         Settings = Settings,
-        Errors = {},
-        Source = '',
+        Buffer = {},
         _INST = {},
         _LUA = {},
-		_MOD = {},
+        _MOD = {},
         HasTags = false,
         NumTags = 0
-    };
-    Res.Source = ('local %s = {};\n\n'):format(Settings.RegName);
-    LoadDescendants(Res, Gui, nil);
-    WriteInstances(Res);
-    WriteScripts(Res);
-    Res.Source = Res.Source .. ('\nreturn %s["%s"], require;'):format(Settings.RegName, Res._INST[1].Id);
-    -- require collection service if tags found
-    if Res.HasTags then
-        Res.Source = 'local CollectionService = game:GetService("CollectionService");\n' .. Res.Source;
+    }
+    
+    -- Header
+    if Settings.Logo and not Settings.Minify then
+        table.insert(Res.Buffer, Logo .. "\n")
     end
-    -- apply comments
-    if Settings.Comments then
-        local Info = ('-- Instances: %d | Scripts: %d | Modules: %d | Tags: %d\n'):format(
-            #Res._INST, #Res._LUA, #Res._MOD, Res.NumTags
-        );
-        Res.Source = Info .. Res.Source;
-    end
-    -- apply logo
-    if Settings.Logo then
-        Res.Source = Logo .. '\n\n' .. Res.Source
-    end
-    return Res;
-end;
+    
+    table.insert(Res.Buffer, string.format("local %s = {};", Settings.RegName))
+    
+    -- Process
+    LoadDescendants(Res, Gui, nil)
+    WriteInstances(Res)
+    WriteScripts(Res)
+    
+    -- Footer
+    table.insert(Res.Buffer, string.format('\nreturn %s["%s"], require;', Settings.RegName, Res._INST[1].Id))
+    
+    return {
+        Gui = Res.Gui,
+        Source = table.concat(Res.Buffer, "")
+    }
+end
 
-return {
-    Convert = Convert
-}
+return { Convert = Convert }
